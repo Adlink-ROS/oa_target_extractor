@@ -303,7 +303,6 @@ private:
 		}
 		
 		try{
-			fprintf(stderr, "***!!! CT: cam_frame_id=%s\n", _cam_frame_id.c_str());
 			_world_to_cam_tf = _tfBuffer->lookupTransform("world", _cam_frame_id, tf2::TimePointZero);
 			_world_tf_alive = true;
 		}
