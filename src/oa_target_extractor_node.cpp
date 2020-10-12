@@ -69,20 +69,19 @@ public:
 		"/object_analytics/tracking", std::bind(&OATargteExtractor::cb_tracking, this, std::placeholders::_1));
 		
 		_pcloud_sub = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-		"/camera/aligned_depth_to_color/color/points", std::bind(&OATargteExtractor::cb_pcloud, this, std::placeholders::_1));
+		"/camera/pointcloud", std::bind(&OATargteExtractor::cb_pcloud, this, std::placeholders::_1));
 		
 		rmw_qos_profile_t qos_profile = rmw_qos_profile_default;
 		qos_profile.reliability = RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT;
 		qos_profile.history = RMW_QOS_POLICY_HISTORY_KEEP_LAST;
 		qos_profile.depth = 1;
 		_publisher = this->create_publisher<geometry_msgs::msg::PoseArray>("human_poses", qos_profile);
-		_tfpoint = create_publisher<geometry_msgs::msg::Point>("point");
 		_marker_pub = create_publisher<visualization_msgs::msg::MarkerArray>("crowds_marker");
 		_tgt_marker_pub = create_publisher<visualization_msgs::msg::MarkerArray>("target_marker");
 	  
 		_timer = this->create_wall_timer(50ms, std::bind(&OATargteExtractor::_timercallback, this));
 		
-		_cam_frame_id = "camera_color_optical_frame";
+		_cam_frame_id = "camera_link";
 		_pclcloud = std::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
 		_tfBuffer = std::make_shared<tf2_ros::Buffer>(this->get_clock());
 		_tf_listener = std::make_shared<tf2_ros::TransformListener>(*_tfBuffer);
@@ -103,7 +102,6 @@ private:
 	std::shared_ptr<tf2_ros::Buffer> _tfBuffer;
 	std::shared_ptr<tf2_ros::TransformListener> _tf_listener; 
 	
-	rclcpp::Publisher<geometry_msgs::msg::Point>::SharedPtr _tfpoint;
 	rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr _publisher;
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr _marker_pub;
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr _tgt_marker_pub;
@@ -126,7 +124,7 @@ private:
 	bool _new_pcloud;
 	
 	geometry_msgs::msg::TransformStamped _tgt_tf, _last_tgt_tf, _vehicle_tgt_tf, _world_to_cam_tf;
-	geometry_msgs::msg::PoseArray _tgt_pose;
+	geometry_msgs::msg::PoseArray _tgt_pose_array;
 	std::string _cam_frame_id;
 	bool _new_tgt;
   
@@ -142,7 +140,6 @@ private:
 	void topic_callback(const object_analytics_msgs::msg::ObjectsInBoxes3D::SharedPtr obj)
 	{
 		std::vector<geometry_msgs::msg::TransformStamped> tf_transforms;
-		geometry_msgs::msg::Point tf_point;
 		int i = 0;
 		for (auto box = obj->objects_in_boxes.begin(); box!=obj->objects_in_boxes.end(); box++)
 		{
@@ -164,7 +161,6 @@ private:
 			tf_transform.transform.rotation.y = 0;
 			tf_transform.transform.rotation.z = 0;
 			tf_transform.transform.rotation.w = 1;
-			tf_point = tfpoint;
 			tf_transforms.push_back(tf_transform);
 			i++;
 			
@@ -191,7 +187,6 @@ private:
 		}
 		_tf_broadcaster.sendTransform(tf_transforms);
 		_marker_pub->publish(_crowds_mk);
-		_tfpoint->publish(tf_point);
 	}
 	
 	void cb_pcloud(const sensor_msgs::msg::PointCloud2::SharedPtr pcloud)
@@ -303,7 +298,6 @@ private:
 		}
 		
 		try{
-			fprintf(stderr, "***!!! CT: cam_frame_id=%s\n", _cam_frame_id.c_str());
 			_world_to_cam_tf = _tfBuffer->lookupTransform("world", _cam_frame_id, tf2::TimePointZero);
 			_world_tf_alive = true;
 		}
@@ -365,6 +359,7 @@ private:
 			return;
 		}
 
+#ifdef DELIVER_TARGET // not used currently
 		_vehicle_tgt_tf.header = tf_world_to_tgt.header;
 		_vehicle_tgt_tf.header.stamp = now;
 		_vehicle_tgt_tf.child_frame_id = std::string("deliver_target");
@@ -381,15 +376,14 @@ private:
 		tf2::fromMsg(_vehicle_tgt_tf, _vehicle_tgt_tf2);
 		tf2::toMsg(_vehicle_tgt_tf2, vehicle_tgt_pose);
 		
-		_tgt_pose.header = _vehicle_tgt_tf.header;
-		_tgt_pose.poses.clear();
-		_tgt_pose.poses.push_back( vehicle_tgt_pose );
-		_publisher->publish(_tgt_pose);
-		
+		_tgt_pose_array.header = tf_world_to_tgt.header;//_vehicle_tgt_tf.header;
+		_tgt_pose_array.poses.clear();
+		_tgt_pose_array.poses.push_back( vehicle_tgt_pose );
+		_publisher->publish(_tgt_pose_array);
 		
 		// for target marker publisher
 		geometry_msgs::msg::Point tfpoint;	
-		std_msgs::msg::Header mk_header = _tgt_pose.header;
+		std_msgs::msg::Header mk_header = tf_world_to_tgt.header;
 		int mk_id = 0;
 		_tgt_mk.markers.clear();
 	
@@ -397,12 +391,35 @@ private:
 		tfpoint.y = tf_world_to_tgt.transform.translation.y;
 		tfpoint.z = tf_world_to_tgt.transform.translation.z;		
 		addHumanMarker(_tgt_mk, mk_header, tfpoint, mk_id, 2);
-		
-		tfpoint.x = _tgt_pose.poses[0].position.x;
-		tfpoint.y = _tgt_pose.poses[0].position.y;
-		tfpoint.z = _tgt_pose.poses[0].position.z;	
+
+		tfpoint.x = _tgt_pose_array.poses[0].position.x;
+		tfpoint.y = _tgt_pose_array.poses[0].position.y;
+		tfpoint.z = _tgt_pose_array.poses[0].position.z;	
 		addTargetMarker(_tgt_mk, mk_header, tfpoint, mk_id,2);
+		_tgt_marker_pub->publish(_tgt_mk);
+#else			
+		// for human pose publisher
+		geometry_msgs::msg::Pose tgt_pose;
+		tf2::Stamped<tf2::Transform> tgt_tf2;
+		tf2::fromMsg(tf_world_to_tgt, tgt_tf2);
+		tf2::toMsg(tgt_tf2, tgt_pose);
+		_tgt_pose_array.header = tf_world_to_tgt.header;
+		_tgt_pose_array.poses.clear();
+		_tgt_pose_array.poses.push_back(tgt_pose);			
+		_publisher->publish(_tgt_pose_array);
+		
+		// for target marker publisher
+		geometry_msgs::msg::Point tfpoint;	
+		std_msgs::msg::Header mk_header = tf_world_to_tgt.header;
+		int mk_id = 0;
+		_tgt_mk.markers.clear();
+	
+		tfpoint.x = tf_world_to_tgt.transform.translation.x;
+		tfpoint.y = tf_world_to_tgt.transform.translation.y;
+		tfpoint.z = tf_world_to_tgt.transform.translation.z;		
+		addHumanMarker(_tgt_mk, mk_header, tfpoint, mk_id, 2);
 		_tgt_marker_pub->publish(_tgt_mk);	
+#endif
 	}
 	
 	
@@ -473,7 +490,7 @@ private:
 		head_mk.color.a = 1.0;
 		head_mk.id = marker_id;
 		marker_array.markers.emplace_back(head_mk);
-		marker_id ++;                
+		marker_id++;                
 	}
 	void addTargetMarker(
 			visualization_msgs::msg::MarkerArray & marker_array,
@@ -512,7 +529,7 @@ private:
 		head_mk.color.a = 1.0;
 		head_mk.id = marker_id;
 		marker_array.markers.emplace_back(head_mk);
-		marker_id ++;                
+		marker_id++;                
 	}
 	
 	float clamp(float n, float lower, float upper) {
